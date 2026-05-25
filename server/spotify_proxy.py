@@ -24,7 +24,7 @@ load_dotenv()
 CLIENT_ID = os.environ["SPOTIFY_CLIENT_ID"]
 CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
 REDIRECT_URI = "https://riwashouse.live/callback"
-SCOPE = "user-read-currently-playing user-read-playback-state"
+SCOPE = "user-read-currently-playing user-read-playback-state user-modify-playback-state"
 
 app = Flask(__name__)
 
@@ -137,6 +137,58 @@ def now_playing():
         "progress_ms": data.get("progress_ms", 0),
         "duration_ms": item.get("duration_ms", 1),
     })
+
+
+@app.route("/play-pause", methods=["POST"])
+def play_pause():
+    token = _refresh_if_needed()
+    if not token:
+        return jsonify({"ok": False, "error": "not_authorized"}), 401
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Check current state
+    resp = requests.get(
+        "https://api.spotify.com/v1/me/player",
+        headers=headers,
+    )
+    if resp.status_code != 200:
+        return jsonify({"ok": False})
+
+    is_playing = resp.json().get("is_playing", False)
+
+    if is_playing:
+        requests.put("https://api.spotify.com/v1/me/player/pause", headers=headers)
+    else:
+        requests.put("https://api.spotify.com/v1/me/player/play", headers=headers)
+
+    return jsonify({"ok": True})
+
+
+@app.route("/next", methods=["POST"])
+def next_track():
+    token = _refresh_if_needed()
+    if not token:
+        return jsonify({"ok": False, "error": "not_authorized"}), 401
+
+    requests.post(
+        "https://api.spotify.com/v1/me/player/next",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    return jsonify({"ok": True})
+
+
+@app.route("/prev", methods=["POST"])
+def prev_track():
+    token = _refresh_if_needed()
+    if not token:
+        return jsonify({"ok": False, "error": "not_authorized"}), 401
+
+    requests.post(
+        "https://api.spotify.com/v1/me/player/previous",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
