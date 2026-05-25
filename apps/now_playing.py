@@ -18,45 +18,54 @@ _GRAY   = 0x777777
 _DGRAY  = 0x444444
 
 # Change this to your computer's local IP
-_PROXY = "http://159.65.123.66:8888"
+_PROXY = "https://riwashouse.live"
 _POLL_INTERVAL = 3000  # ms between polls
 
 _last_track = None
 
 
 def _http_get(url):
-    """Minimal HTTP GET using raw sockets (no urequests needed)."""
+    """HTTP/HTTPS GET using ssl-wrapped sockets."""
     import socket
+    import ssl
 
-    # Parse URL
-    url = url.replace("http://", "")
-    host_port, path = url.split("/", 1)
-    path = "/" + path
+    is_https = url.startswith("https://")
+    url_body = url.replace("https://", "").replace("http://", "")
+
+    if "/" in url_body:
+        host_port, path = url_body.split("/", 1)
+        path = "/" + path
+    else:
+        host_port = url_body
+        path = "/"
+
     if ":" in host_port:
         host, port = host_port.split(":")
         port = int(port)
     else:
         host = host_port
-        port = 80
+        port = 443 if is_https else 80
 
     s = socket.socket()
     s.settimeout(5)
     try:
         s.connect((host, port))
+        if is_https:
+            s = ssl.wrap_socket(s, server_hostname=host)
+
         req = "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n".format(path, host)
-        s.send(req.encode())
+        s.write(req.encode()) if is_https else s.send(req.encode())
 
         response = b""
         while True:
             try:
-                chunk = s.recv(1024)
+                chunk = s.read(1024) if is_https else s.recv(1024)
                 if not chunk:
                     break
                 response += chunk
             except:
                 break
 
-        # Split headers and body
         parts = response.split(b"\r\n\r\n", 1)
         if len(parts) == 2:
             return json.loads(parts[1])

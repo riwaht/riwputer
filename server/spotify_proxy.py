@@ -23,7 +23,7 @@ load_dotenv()
 
 CLIENT_ID = os.environ["SPOTIFY_CLIENT_ID"]
 CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
-REDIRECT_URI = "http://159.65.123.66:8888/callback"
+REDIRECT_URI = "https://riwashouse.live/callback"
 SCOPE = "user-read-currently-playing user-read-playback-state"
 
 app = Flask(__name__)
