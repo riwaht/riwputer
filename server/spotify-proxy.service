@@ -1,0 +1,13 @@
+[Unit]
+Description=Spotify Proxy for Cardputer
+After=network.target
+
+[Service]
+WorkingDirectory=/root/riwputer/server
+Environment="PATH=/root/riwputer/server/.venv/bin"
+ExecStart=/root/riwputer/server/.venv/bin/python /root/riwputer/server/spotify_proxy.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
