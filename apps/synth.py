@@ -202,7 +202,3 @@ def run():
         except:
             pass
         time.sleep_ms(200)
-        machine.reset()
-
-
-run()
