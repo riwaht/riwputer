@@ -217,10 +217,14 @@ def _download_audio(track, artist):
         "no_warnings": True,
         "socket_timeout": 15,
         "match_filter": yt_dlp.utils.match_filter_func("duration < 600"),
+        "extractor_args": {"youtube": {"player_client": ["web_music"]}},
     }
 
     if os.path.exists(cookies_path):
         ydl_opts["cookiefile"] = cookies_path
+        app.logger.info(f"Using cookies from {cookies_path}")
+    else:
+        app.logger.warning(f"No cookies file at {cookies_path}")
 
     query = f"{track} {artist}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
