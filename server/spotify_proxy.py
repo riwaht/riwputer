@@ -202,6 +202,8 @@ def _download_audio(track, artist):
     tmp_dir = tempfile.mkdtemp()
     out_path = os.path.join(tmp_dir, "audio")
 
+    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
     ydl_opts = {
         "format": "bestaudio/best",
         "postprocessors": [{
@@ -216,6 +218,9 @@ def _download_audio(track, artist):
         "socket_timeout": 15,
         "match_filter": yt_dlp.utils.match_filter_func("duration < 600"),
     }
+
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
 
     query = f"{track} {artist}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
