@@ -15,6 +15,7 @@ import os
 import time
 import threading
 import tempfile
+import traceback
 
 from flask import Flask, redirect, request, jsonify
 import requests
@@ -310,17 +311,19 @@ def synth_preview():
             "notes": _note_cache["notes"],
         })
 
-    # Download from YouTube and extract melody
+    # Download from Deezer and extract melody
     tmp_dir = None
     try:
-        wav_path, tmp_dir = _download_audio(track, artist)
-        if not wav_path:
+        audio_path, tmp_dir = _download_audio(track, artist)
+        if not audio_path:
             return jsonify({"ok": False, "error": "download_failed"})
 
-        notes = _extract_notes(wav_path)
+        app.logger.info(f"Extracting notes from {audio_path}")
+        notes = _extract_notes(audio_path)
+        app.logger.info(f"Extracted {len(notes)} notes")
     except Exception as e:
-        app.logger.error(f"Synth extraction failed: {e}")
-        return jsonify({"ok": False, "error": "extraction_failed"})
+        app.logger.error(f"Synth failed: {traceback.format_exc()}")
+        return jsonify({"ok": False, "error": str(e)[:80]})
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
