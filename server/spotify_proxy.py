@@ -14,7 +14,7 @@ The Cardputer hits http://<your-ip>:8888/now-playing for track info.
 import os
 import time
 import threading
-import tempfile
+import math
 
 from flask import Flask, redirect, request, jsonify
 import requests
@@ -195,58 +195,72 @@ def prev_track():
     return jsonify({"ok": True})
 
 
-def _extract_notes(preview_url):
-    """Download preview MP3 and extract melody as a note sequence."""
-    import librosa
-    import numpy as np
+# C4-C6 frequencies for MIDI notes 60-84
+_MIDI_FREQ = {
+    midi: round(440 * 2 ** ((midi - 69) / 12))
+    for midi in range(60, 85)
+}
 
-    resp = requests.get(preview_url, timeout=15)
-    if resp.status_code != 200:
+
+def _extract_notes_from_analysis(analysis_data):
+    """Convert Spotify audio analysis segments into a note sequence.
+
+    Each segment has a 12-element `pitches` array (C, C#, D, ..., B)
+    representing the relative energy of each pitch class.  We pick the
+    dominant pitch, map it to a frequency in the C4-C6 range, and pair
+    it with the segment's duration.
+    """
+    segments = analysis_data.get("segments", [])
+    if not segments:
         return []
 
-    fd, tmp = tempfile.mkstemp(suffix=".mp3")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(resp.content)
+    raw = []
+    for seg in segments:
+        pitches = seg.get("pitches", [])
+        dur_ms = int(seg.get("duration", 0.1) * 1000)
+        loudness = seg.get("loudness_max", -60)
 
-        y, sr = librosa.load(tmp, sr=22050, mono=True, duration=30)
+        if not pitches or loudness < -40:
+            # Too quiet — treat as rest
+            raw.append([0, dur_ms])
+            continue
 
-        f0, _voiced, probs = librosa.pyin(
-            y, fmin=130, fmax=1047, sr=sr,
-            frame_length=2048, hop_length=1024,
-        )
+        # Find dominant pitch class (0=C, 1=C#, ..., 11=B)
+        dominant = max(range(12), key=lambda i: pitches[i])
+        confidence = pitches[dominant]
 
-        hop_ms = (1024 / sr) * 1000  # ~46 ms per frame
+        if confidence < 0.4:
+            raw.append([0, dur_ms])
+            continue
 
-        raw = []
-        for i, freq in enumerate(f0):
-            if np.isnan(freq) or freq < 100 or probs[i] < 0.3:
-                raw.append([0, int(hop_ms)])
-            else:
-                midi = int(round(librosa.hz_to_midi(freq)))
-                midi = max(60, min(84, midi))  # clamp C4-C6
-                qfreq = int(round(librosa.midi_to_hz(midi)))
-                raw.append([qfreq, int(hop_ms)])
+        # Map to octave based on loudness (louder → higher octave)
+        if loudness > -15:
+            octave = 5  # MIDI 72-83
+        else:
+            octave = 4  # MIDI 60-71
 
-        # Compress consecutive identical frequencies
-        compressed = []
-        for note in raw:
-            if compressed and compressed[-1][0] == note[0]:
-                compressed[-1][1] += note[1]
-            else:
-                compressed.append(list(note))
+        midi = 60 + (octave - 4) * 12 + dominant
+        midi = max(60, min(84, midi))
+        freq = _MIDI_FREQ[midi]
+        raw.append([freq, dur_ms])
 
-        # Drop entries shorter than 50 ms (absorb into previous)
-        filtered = []
-        for n in compressed:
-            if n[1] >= 50:
-                filtered.append(n)
-            elif filtered:
-                filtered[-1][1] += n[1]
+    # Compress consecutive identical frequencies
+    compressed = []
+    for note in raw:
+        if compressed and compressed[-1][0] == note[0]:
+            compressed[-1][1] += note[1]
+        else:
+            compressed.append(list(note))
 
-        return filtered[:200]  # cap for ESP32 memory
-    finally:
-        os.unlink(tmp)
+    # Drop entries shorter than 50 ms (absorb into previous)
+    filtered = []
+    for n in compressed:
+        if n[1] >= 50:
+            filtered.append(n)
+        elif filtered:
+            filtered[-1][1] += n[1]
+
+    return filtered[:200]  # cap for ESP32 memory
 
 
 @app.route("/synth-preview")
@@ -255,9 +269,11 @@ def synth_preview():
     if not token:
         return jsonify({"ok": False, "error": "not_authorized"}), 401
 
+    headers = {"Authorization": f"Bearer {token}"}
+
     resp = requests.get(
         "https://api.spotify.com/v1/me/player/currently-playing",
-        headers={"Authorization": f"Bearer {token}"},
+        headers=headers,
     )
 
     if resp.status_code == 204 or resp.status_code == 202:
@@ -280,11 +296,15 @@ def synth_preview():
             "notes": _note_cache["notes"],
         })
 
-    preview_url = item.get("preview_url")
-    if not preview_url:
-        return jsonify({"ok": False, "error": "no_preview"})
+    # Fetch audio analysis
+    analysis_resp = requests.get(
+        f"https://api.spotify.com/v1/audio-analysis/{track_id}",
+        headers=headers,
+    )
+    if analysis_resp.status_code != 200:
+        return jsonify({"ok": False, "error": "no_analysis"})
 
-    notes = _extract_notes(preview_url)
+    notes = _extract_notes_from_analysis(analysis_resp.json())
     if not notes:
         return jsonify({"ok": False, "error": "extraction_failed"})
 
