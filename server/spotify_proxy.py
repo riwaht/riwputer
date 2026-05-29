@@ -195,53 +195,96 @@ def prev_track():
     return jsonify({"ok": True})
 
 
+_PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.r4fo.com",
+    "https://pipedapi.adminforge.de",
+]
+
+
 def _download_audio(track, artist):
-    """Search YouTube for the track and download audio to a temp WAV file."""
-    import yt_dlp
-
-    tmp_dir = tempfile.mkdtemp()
-    out_path = os.path.join(tmp_dir, "audio")
-
-    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "wav",
-            "preferredquality": "0",
-        }],
-        "outtmpl": out_path + ".%(ext)s",
-        "default_search": "ytsearch1",
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 15,
-        "match_filter": yt_dlp.utils.match_filter_func("duration < 600"),
-        "extractor_args": {"youtube": {"player_client": ["web_music"]}},
-    }
-
-    if os.path.exists(cookies_path):
-        ydl_opts["cookiefile"] = cookies_path
-        app.logger.info(f"Using cookies from {cookies_path}")
-    else:
-        app.logger.warning(f"No cookies file at {cookies_path}")
-
+    """Search Piped (YouTube frontend) and download audio to a temp file."""
     query = f"{track} {artist}"
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([query])
 
-    wav_path = out_path + ".wav"
-    if os.path.exists(wav_path):
-        return wav_path, tmp_dir
-    return None, tmp_dir
+    for base_url in _PIPED_INSTANCES:
+        try:
+            # Search for the track
+            resp = requests.get(
+                f"{base_url}/search",
+                params={"q": query, "filter": "music_songs"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+
+            items = resp.json().get("items", [])
+            if not items:
+                # Try without filter
+                resp = requests.get(
+                    f"{base_url}/search",
+                    params={"q": query, "filter": "videos"},
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    continue
+                items = resp.json().get("items", [])
+                if not items:
+                    continue
+
+            # Get video ID from first result
+            video_url = items[0].get("url", "")
+            video_id = video_url.replace("/watch?v=", "")
+            if not video_id:
+                continue
+
+            # Get audio streams
+            resp = requests.get(
+                f"{base_url}/streams/{video_id}", timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+
+            streams = resp.json().get("audioStreams", [])
+            if not streams:
+                continue
+
+            # Pick the best bitrate audio stream
+            stream = max(streams, key=lambda s: s.get("bitrate", 0))
+            audio_url = stream["url"]
+
+            # Download the audio
+            resp = requests.get(audio_url, timeout=30, stream=True)
+            if resp.status_code != 200:
+                continue
+
+            # Determine extension from mime type
+            mime = stream.get("mimeType", "audio/webm")
+            ext = "m4a" if "mp4" in mime else "webm"
+
+            tmp_dir = tempfile.mkdtemp()
+            audio_path = os.path.join(tmp_dir, f"audio.{ext}")
+            with open(audio_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    f.write(chunk)
+
+            app.logger.info(
+                f"Downloaded from {base_url}: {video_id} ({ext})"
+            )
+            return audio_path, tmp_dir
+
+        except Exception as e:
+            app.logger.warning(f"Piped {base_url} failed: {e}")
+            continue
+
+    return None, None
 
 
-def _extract_notes(wav_path):
-    """Extract melody from a WAV file using pitch detection."""
+def _extract_notes(audio_path):
+    """Extract melody from an audio file using pitch detection."""
     import librosa
     import numpy as np
 
-    y, sr = librosa.load(wav_path, sr=22050, mono=True, duration=30)
+    y, sr = librosa.load(audio_path, sr=22050, mono=True, duration=30)
 
     f0, _voiced, probs = librosa.pyin(
         y, fmin=130, fmax=1047, sr=sr,

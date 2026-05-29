@@ -3,4 +3,4 @@ requests
 python-dotenv
 librosa
 numpy
-yt-dlp
+audioread
