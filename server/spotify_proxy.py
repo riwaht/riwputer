@@ -287,18 +287,28 @@ def _extract_notes(audio_path):
         else:
             compressed.append(list(note))
 
-    # Cap silence gaps at 500 ms so playback doesn't stall
+    # Cap silence gaps at 300 ms so playback doesn't stall
     for n in compressed:
-        if n[0] == 0 and n[1] > 500:
-            n[1] = 500
+        if n[0] == 0 and n[1] > 300:
+            n[1] = 300
 
-    # Drop entries shorter than 40 ms (absorb into previous)
-    filtered = []
+    # Merge very short voiced notes into neighbors — the ESP32 speaker
+    # can't switch tones faster than ~100 ms
+    merged = []
     for n in compressed:
-        if n[1] >= 40:
-            filtered.append(n)
-        elif filtered:
+        if n[1] < 100 and merged:
+            # Too short: absorb into previous note
+            merged[-1][1] += n[1]
+        else:
+            merged.append(list(n))
+
+    # Remove remaining silence entries shorter than 80 ms
+    filtered = []
+    for n in merged:
+        if n[0] == 0 and n[1] < 80 and filtered:
             filtered[-1][1] += n[1]
+        else:
+            filtered.append(n)
 
     app.logger.warning(f"Notes: {len(filtered)} entries, {sum(1 for n in filtered if n[0] > 0)} voiced")
 
