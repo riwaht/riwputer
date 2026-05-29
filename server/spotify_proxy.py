@@ -196,61 +196,40 @@ def prev_track():
 
 
 def _download_audio(track, artist):
-    """Search YouTube for the track and download audio via yt-dlp."""
-    import yt_dlp
+    """Search Deezer for the track and download its 30-sec MP3 preview."""
+    query = f"{track} {artist}"
+
+    resp = requests.get(
+        "https://api.deezer.com/search",
+        params={"q": query, "limit": 1},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        app.logger.warning(f"Deezer search failed: {resp.status_code}")
+        return None, None
+
+    results = resp.json().get("data", [])
+    if not results:
+        app.logger.warning(f"Deezer: no results for '{query}'")
+        return None, None
+
+    preview_url = results[0].get("preview")
+    if not preview_url:
+        app.logger.warning("Deezer: no preview URL")
+        return None, None
+
+    resp = requests.get(preview_url, timeout=15)
+    if resp.status_code != 200:
+        app.logger.warning(f"Deezer preview download failed: {resp.status_code}")
+        return None, None
 
     tmp_dir = tempfile.mkdtemp()
-    out_path = os.path.join(tmp_dir, "audio")
-    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    audio_path = os.path.join(tmp_dir, "audio.mp3")
+    with open(audio_path, "wb") as f:
+        f.write(resp.content)
 
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "wav",
-            "preferredquality": "0",
-        }],
-        "outtmpl": out_path + ".%(ext)s",
-        "default_search": "ytsearch1",
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 15,
-    }
-
-    if os.path.exists(cookies_path):
-        ydl_opts["cookiefile"] = cookies_path
-
-    # Try different player clients — some bypass bot detection
-    clients_to_try = [
-        ["ios"],
-        ["tv"],
-        ["web_creator"],
-        ["mweb"],
-    ]
-
-    query = f"{track} {artist} audio"
-
-    for clients in clients_to_try:
-        ydl_opts["extractor_args"] = {
-            "youtube": {"player_client": clients}
-        }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([query])
-
-            wav_path = out_path + ".wav"
-            if os.path.exists(wav_path):
-                app.logger.info(
-                    f"Downloaded with client {clients}"
-                )
-                return wav_path, tmp_dir
-        except Exception as e:
-            app.logger.warning(
-                f"yt-dlp client {clients} failed: {e}"
-            )
-            continue
-
-    return None, tmp_dir
+    app.logger.info(f"Downloaded Deezer preview for '{query}'")
+    return audio_path, tmp_dir
 
 
 def _extract_notes(audio_path):
