@@ -243,11 +243,11 @@ def _extract_notes(audio_path):
     wav_path = audio_path.rsplit(".", 1)[0] + ".wav"
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", audio_path, "-ar", "22050", "-ac", "1", wav_path],
+            ["/usr/bin/ffmpeg", "-y", "-i", audio_path, "-ar", "22050", "-ac", "1", wav_path],
             capture_output=True, timeout=30,
         )
     except FileNotFoundError:
-        app.logger.error("ffmpeg not found — install it on the server")
+        app.logger.error("ffmpeg not found at /usr/bin/ffmpeg")
         raise RuntimeError("ffmpeg not found")
 
     if not os.path.exists(wav_path):
