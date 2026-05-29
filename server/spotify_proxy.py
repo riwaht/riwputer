@@ -272,7 +272,7 @@ def _extract_notes(audio_path):
             raw.append([0, int(hop_ms)])
         else:
             midi = int(round(librosa.hz_to_midi(freq)))
-            midi = max(48, min(84, midi))  # clamp C3-C6
+            midi = max(60, min(83, midi))  # clamp C4-B5 (Cardputer speaker range)
             qfreq = int(round(librosa.midi_to_hz(midi)))
             raw.append([qfreq, int(hop_ms)])
 
