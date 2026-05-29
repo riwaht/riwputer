@@ -14,8 +14,7 @@ The Cardputer hits http://<your-ip>:8888/now-playing for track info.
 import os
 import time
 import threading
-import hashlib
-import struct
+import tempfile
 
 from flask import Flask, redirect, request, jsonify
 import requests
@@ -196,85 +195,85 @@ def prev_track():
     return jsonify({"ok": True})
 
 
-# Pentatonic scales — sound good on a tiny speaker.
-# Each scale is semitone offsets from the root, spanning two octaves.
-_MAJOR_PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21]   # happy
-_MINOR_PENTA = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22]   # moody
+def _download_audio(track, artist):
+    """Search YouTube for the track and download audio to a temp WAV file."""
+    import yt_dlp
+
+    tmp_dir = tempfile.mkdtemp()
+    out_path = os.path.join(tmp_dir, "audio")
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "wav",
+            "preferredquality": "0",
+        }],
+        "outtmpl": out_path + ".%(ext)s",
+        "default_search": "ytsearch1",
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 15,
+        "match_filter": yt_dlp.utils.match_filter_func("duration < 600"),
+    }
+
+    query = f"{track} {artist}"
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([query])
+
+    wav_path = out_path + ".wav"
+    if os.path.exists(wav_path):
+        return wav_path, tmp_dir
+    return None, tmp_dir
 
 
-def _seeded_rng(seed_bytes):
-    """Simple deterministic PRNG from a seed.  Returns a callable that
-    produces ints in a given range — same seed always gives the same
-    sequence."""
-    state = list(struct.unpack(">4I", seed_bytes[:16]))
+def _extract_notes(wav_path):
+    """Extract melody from a WAV file using pitch detection."""
+    import librosa
+    import numpy as np
 
-    def _next(lo, hi):
-        # xoshiro128** core
-        r = ((state[1] * 5) & 0xFFFFFFFF)
-        r = (((r << 7) | (r >> 25)) * 9) & 0xFFFFFFFF
-        t = (state[1] << 9) & 0xFFFFFFFF
-        state[2] ^= state[0]
-        state[3] ^= state[1]
-        state[1] ^= state[2]
-        state[0] ^= state[3]
-        state[2] ^= t
-        state[3] = ((state[3] << 11) | (state[3] >> 21)) & 0xFFFFFFFF
-        return lo + (r % (hi - lo + 1))
+    y, sr = librosa.load(wav_path, sr=22050, mono=True, duration=30)
 
-    return _next
+    f0, _voiced, probs = librosa.pyin(
+        y, fmin=130, fmax=1047, sr=sr,
+        frame_length=2048, hop_length=1024,
+    )
 
+    hop_ms = (1024 / sr) * 1000  # ~46 ms per frame
 
-def _generate_melody(track_id, duration_ms):
-    """Generate a deterministic melody from a track ID.
+    raw = []
+    for i, freq in enumerate(f0):
+        if np.isnan(freq) or freq < 100 or probs[i] < 0.3:
+            raw.append([0, int(hop_ms)])
+        else:
+            midi = int(round(librosa.hz_to_midi(freq)))
+            midi = max(60, min(84, midi))  # clamp C4-C6
+            qfreq = int(round(librosa.midi_to_hz(midi)))
+            raw.append([qfreq, int(hop_ms)])
 
-    The track ID is hashed to seed a PRNG that picks a root note, scale,
-    tempo, and note pattern.  The same track always produces the same
-    melody.
-    """
-    seed = hashlib.md5(track_id.encode()).digest()
-    rng = _seeded_rng(seed)
+    # Compress consecutive identical frequencies
+    compressed = []
+    for note in raw:
+        if compressed and compressed[-1][0] == note[0]:
+            compressed[-1][1] += note[1]
+        else:
+            compressed.append(list(note))
 
-    # Pick root note (C4=60 through B4=71)
-    root_midi = 60 + (seed[0] % 12)
+    # Drop entries shorter than 50 ms (absorb into previous)
+    filtered = []
+    for n in compressed:
+        if n[1] >= 50:
+            filtered.append(n)
+        elif filtered:
+            filtered[-1][1] += n[1]
 
-    # Pick scale — use the second seed byte
-    scale = _MINOR_PENTA if seed[1] % 2 == 0 else _MAJOR_PENTA
-
-    # Tempo: note duration range 120-400 ms
-    base_dur = 120 + (seed[2] % 280)
-
-    # Build note sequence to fill the track duration
-    notes = []
-    total_ms = 0
-    prev_scale_idx = len(scale) // 2  # start mid-scale
-
-    while total_ms < duration_ms and len(notes) < 200:
-        # Weighted random walk: prefer stepwise motion
-        step = rng(-2, 2)
-        new_idx = max(0, min(len(scale) - 1, prev_scale_idx + step))
-        prev_scale_idx = new_idx
-
-        midi = root_midi + scale[new_idx]
-        midi = max(60, min(84, midi))
-        freq = round(440 * 2 ** ((midi - 69) / 12))
-
-        # Vary note duration slightly
-        dur = base_dur + rng(-40, 40)
-
-        # Occasionally add a rest (~15% chance)
-        if rng(0, 99) < 15:
-            rest_dur = rng(80, 200)
-            notes.append([0, rest_dur])
-            total_ms += rest_dur
-
-        notes.append([freq, dur])
-        total_ms += dur
-
-    return notes
+    return filtered[:200]  # cap for ESP32 memory
 
 
 @app.route("/synth-preview")
 def synth_preview():
+    import shutil
+
     token = _refresh_if_needed()
     if not token:
         return jsonify({"ok": False, "error": "not_authorized"}), 401
@@ -296,7 +295,6 @@ def synth_preview():
     track_id = item.get("id", "")
     track = item.get("name", "Unknown")
     artist = ", ".join(a["name"] for a in item.get("artists", []))
-    duration_ms = item.get("duration_ms", 30000)
 
     # Return cached result if same track
     if _note_cache["track_id"] == track_id and _note_cache["notes"]:
@@ -307,7 +305,23 @@ def synth_preview():
             "notes": _note_cache["notes"],
         })
 
-    notes = _generate_melody(track_id, duration_ms)
+    # Download from YouTube and extract melody
+    tmp_dir = None
+    try:
+        wav_path, tmp_dir = _download_audio(track, artist)
+        if not wav_path:
+            return jsonify({"ok": False, "error": "download_failed"})
+
+        notes = _extract_notes(wav_path)
+    except Exception as e:
+        app.logger.error(f"Synth extraction failed: {e}")
+        return jsonify({"ok": False, "error": "extraction_failed"})
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if not notes:
+        return jsonify({"ok": False, "error": "no_notes"})
 
     _note_cache["track_id"] = track_id
     _note_cache["notes"] = notes
