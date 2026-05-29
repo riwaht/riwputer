@@ -195,88 +195,62 @@ def prev_track():
     return jsonify({"ok": True})
 
 
-_PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.r4fo.com",
-    "https://pipedapi.adminforge.de",
-]
-
-
 def _download_audio(track, artist):
-    """Search Piped (YouTube frontend) and download audio to a temp file."""
-    query = f"{track} {artist}"
+    """Search YouTube for the track and download audio via yt-dlp."""
+    import yt_dlp
 
-    for base_url in _PIPED_INSTANCES:
+    tmp_dir = tempfile.mkdtemp()
+    out_path = os.path.join(tmp_dir, "audio")
+    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "wav",
+            "preferredquality": "0",
+        }],
+        "outtmpl": out_path + ".%(ext)s",
+        "default_search": "ytsearch1",
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 15,
+    }
+
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
+
+    # Try different player clients — some bypass bot detection
+    clients_to_try = [
+        ["ios"],
+        ["tv"],
+        ["web_creator"],
+        ["mweb"],
+    ]
+
+    query = f"{track} {artist} audio"
+
+    for clients in clients_to_try:
+        ydl_opts["extractor_args"] = {
+            "youtube": {"player_client": clients}
+        }
         try:
-            # Search for the track
-            resp = requests.get(
-                f"{base_url}/search",
-                params={"q": query, "filter": "music_songs"},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                continue
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([query])
 
-            items = resp.json().get("items", [])
-            if not items:
-                # Try without filter
-                resp = requests.get(
-                    f"{base_url}/search",
-                    params={"q": query, "filter": "videos"},
-                    timeout=10,
+            wav_path = out_path + ".wav"
+            if os.path.exists(wav_path):
+                app.logger.info(
+                    f"Downloaded with client {clients}"
                 )
-                if resp.status_code != 200:
-                    continue
-                items = resp.json().get("items", [])
-                if not items:
-                    continue
-
-            # Get video ID from first result
-            video_url = items[0].get("url", "")
-            video_id = video_url.replace("/watch?v=", "")
-            if not video_id:
-                continue
-
-            # Get audio streams
-            resp = requests.get(
-                f"{base_url}/streams/{video_id}", timeout=10,
-            )
-            if resp.status_code != 200:
-                continue
-
-            streams = resp.json().get("audioStreams", [])
-            if not streams:
-                continue
-
-            # Pick the best bitrate audio stream
-            stream = max(streams, key=lambda s: s.get("bitrate", 0))
-            audio_url = stream["url"]
-
-            # Download the audio
-            resp = requests.get(audio_url, timeout=30, stream=True)
-            if resp.status_code != 200:
-                continue
-
-            # Determine extension from mime type
-            mime = stream.get("mimeType", "audio/webm")
-            ext = "m4a" if "mp4" in mime else "webm"
-
-            tmp_dir = tempfile.mkdtemp()
-            audio_path = os.path.join(tmp_dir, f"audio.{ext}")
-            with open(audio_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    f.write(chunk)
-
-            app.logger.info(
-                f"Downloaded from {base_url}: {video_id} ({ext})"
-            )
-            return audio_path, tmp_dir
-
+                return wav_path, tmp_dir
         except Exception as e:
-            app.logger.warning(f"Piped {base_url} failed: {e}")
+            app.logger.warning(
+                f"yt-dlp client {clients} failed: {e}"
+            )
             continue
 
-    return None, None
+    return None, tmp_dir
 
 
 def _extract_notes(audio_path):

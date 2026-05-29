@@ -22,5 +22,6 @@ jobs:
             git pull
             cd server
             source .venv/bin/activate
+            pip install -U yt-dlp --quiet
             pip install -r requirements.txt --quiet
             sudo systemctl restart spotify-proxy

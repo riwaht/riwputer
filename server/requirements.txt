@@ -4,3 +4,4 @@ python-dotenv
 librosa
 numpy
 audioread
+yt-dlp
