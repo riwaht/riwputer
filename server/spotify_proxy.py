@@ -235,10 +235,25 @@ def _download_audio(track, artist):
 
 def _extract_notes(audio_path):
     """Extract melody from an audio file using pitch detection."""
+    import subprocess
     import librosa
     import numpy as np
 
-    y, sr = librosa.load(audio_path, sr=22050, mono=True, duration=30)
+    # Convert MP3 to WAV first — avoids audioread/codec issues
+    wav_path = audio_path.rsplit(".", 1)[0] + ".wav"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", audio_path, "-ar", "22050", "-ac", "1", wav_path],
+            capture_output=True, timeout=30,
+        )
+    except FileNotFoundError:
+        app.logger.error("ffmpeg not found — install it on the server")
+        raise RuntimeError("ffmpeg not found")
+
+    if not os.path.exists(wav_path):
+        raise RuntimeError("ffmpeg conversion failed")
+
+    y, sr = librosa.load(wav_path, sr=22050, mono=True, duration=30)
 
     f0, _voiced, probs = librosa.pyin(
         y, fmin=130, fmax=1047, sr=sr,
