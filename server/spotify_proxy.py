@@ -14,6 +14,7 @@ The Cardputer hits http://<your-ip>:8888/now-playing for track info.
 import os
 import time
 import threading
+import tempfile
 
 from flask import Flask, redirect, request, jsonify
 import requests
@@ -27,6 +28,9 @@ REDIRECT_URI = "https://riwashouse.live/callback"
 SCOPE = "user-read-currently-playing user-read-playback-state user-modify-playback-state"
 
 app = Flask(__name__)
+
+# Note cache for synth preview
+_note_cache = {"track_id": None, "notes": [], "track": "", "artist": ""}
 
 # Token state
 _token = {
@@ -189,6 +193,112 @@ def prev_track():
         headers={"Authorization": f"Bearer {token}"},
     )
     return jsonify({"ok": True})
+
+
+def _extract_notes(preview_url):
+    """Download preview MP3 and extract melody as a note sequence."""
+    import librosa
+    import numpy as np
+
+    resp = requests.get(preview_url, timeout=15)
+    if resp.status_code != 200:
+        return []
+
+    fd, tmp = tempfile.mkstemp(suffix=".mp3")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(resp.content)
+
+        y, sr = librosa.load(tmp, sr=22050, mono=True, duration=30)
+
+        f0, _voiced, probs = librosa.pyin(
+            y, fmin=130, fmax=1047, sr=sr,
+            frame_length=2048, hop_length=1024,
+        )
+
+        hop_ms = (1024 / sr) * 1000  # ~46 ms per frame
+
+        raw = []
+        for i, freq in enumerate(f0):
+            if np.isnan(freq) or freq < 100 or probs[i] < 0.3:
+                raw.append([0, int(hop_ms)])
+            else:
+                midi = int(round(librosa.hz_to_midi(freq)))
+                midi = max(60, min(84, midi))  # clamp C4-C6
+                qfreq = int(round(librosa.midi_to_hz(midi)))
+                raw.append([qfreq, int(hop_ms)])
+
+        # Compress consecutive identical frequencies
+        compressed = []
+        for note in raw:
+            if compressed and compressed[-1][0] == note[0]:
+                compressed[-1][1] += note[1]
+            else:
+                compressed.append(list(note))
+
+        # Drop entries shorter than 50 ms (absorb into previous)
+        filtered = []
+        for n in compressed:
+            if n[1] >= 50:
+                filtered.append(n)
+            elif filtered:
+                filtered[-1][1] += n[1]
+
+        return filtered[:200]  # cap for ESP32 memory
+    finally:
+        os.unlink(tmp)
+
+
+@app.route("/synth-preview")
+def synth_preview():
+    token = _refresh_if_needed()
+    if not token:
+        return jsonify({"ok": False, "error": "not_authorized"}), 401
+
+    resp = requests.get(
+        "https://api.spotify.com/v1/me/player/currently-playing",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    if resp.status_code == 204 or resp.status_code == 202:
+        return jsonify({"ok": False, "error": "not_playing"})
+    if resp.status_code != 200:
+        return jsonify({"ok": False, "error": "api_error"})
+
+    data = resp.json()
+    item = data.get("item", {})
+    track_id = item.get("id", "")
+    track = item.get("name", "Unknown")
+    artist = ", ".join(a["name"] for a in item.get("artists", []))
+
+    # Return cached result if same track
+    if _note_cache["track_id"] == track_id and _note_cache["notes"]:
+        return jsonify({
+            "ok": True,
+            "track": track,
+            "artist": artist,
+            "notes": _note_cache["notes"],
+        })
+
+    preview_url = item.get("preview_url")
+    if not preview_url:
+        return jsonify({"ok": False, "error": "no_preview"})
+
+    notes = _extract_notes(preview_url)
+    if not notes:
+        return jsonify({"ok": False, "error": "extraction_failed"})
+
+    _note_cache["track_id"] = track_id
+    _note_cache["notes"] = notes
+    _note_cache["track"] = track
+    _note_cache["artist"] = artist
+
+    return jsonify({
+        "ok": True,
+        "track": track,
+        "artist": artist,
+        "notes": notes,
+    })
 
 
 if __name__ == "__main__":

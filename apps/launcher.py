@@ -7,7 +7,7 @@ import network
 import M5
 from hardware import MatrixKeyboard
 
-from apps.icons import ICON_SYNTH, ICON_WIFI, ICON_PLAY, draw_icon
+from apps.icons import ICON_SYNTH, ICON_WIFI, ICON_PLAY, ICON_SYNTHPLAY, draw_icon
 
 _LCD = M5.Lcd
 
@@ -36,6 +36,7 @@ APPS = [
     {"name": "Synth",  "icon": ICON_SYNTH, "color": _ORANGE, "module": "apps.synth"},
     {"name": "Wi-Fi",  "icon": ICON_WIFI,  "color": _BLUE,   "module": "apps.wifi_scanner"},
     {"name": "Playing", "icon": ICON_PLAY, "color": 0x1DB954, "module": "apps.now_playing"},
+    {"name": "SynthFi", "icon": ICON_SYNTHPLAY, "color": 0xDD44DD, "module": "apps.synth_player"},
 ]
 
 # Selection state
