@@ -255,22 +255,29 @@ def _extract_notes(audio_path):
 
     y, sr = librosa.load(wav_path, sr=22050, mono=True, duration=30)
 
+    # Separate harmonic content from drums/percussive — helps pyin
+    # find the melody in a full mix
+    y_harm = librosa.effects.harmonic(y, margin=4.0)
+
     f0, _voiced, probs = librosa.pyin(
-        y, fmin=130, fmax=1047, sr=sr,
-        frame_length=2048, hop_length=1024,
+        y_harm, fmin=80, fmax=1047, sr=sr,
+        frame_length=2048, hop_length=512,
     )
 
-    hop_ms = (1024 / sr) * 1000  # ~46 ms per frame
+    hop_ms = (512 / sr) * 1000  # ~23 ms per frame
 
     raw = []
     for i, freq in enumerate(f0):
-        if np.isnan(freq) or freq < 100 or probs[i] < 0.3:
+        if np.isnan(freq) or freq < 70 or probs[i] < 0.15:
             raw.append([0, int(hop_ms)])
         else:
             midi = int(round(librosa.hz_to_midi(freq)))
-            midi = max(60, min(84, midi))  # clamp C4-C6
+            midi = max(48, min(84, midi))  # clamp C3-C6
             qfreq = int(round(librosa.midi_to_hz(midi)))
             raw.append([qfreq, int(hop_ms)])
+
+    voiced = sum(1 for n in raw if n[0] > 0)
+    app.logger.warning(f"pyin: {voiced}/{len(raw)} voiced frames")
 
     # Compress consecutive identical frequencies
     compressed = []
@@ -280,13 +287,20 @@ def _extract_notes(audio_path):
         else:
             compressed.append(list(note))
 
-    # Drop entries shorter than 50 ms (absorb into previous)
+    # Cap silence gaps at 500 ms so playback doesn't stall
+    for n in compressed:
+        if n[0] == 0 and n[1] > 500:
+            n[1] = 500
+
+    # Drop entries shorter than 40 ms (absorb into previous)
     filtered = []
     for n in compressed:
-        if n[1] >= 50:
+        if n[1] >= 40:
             filtered.append(n)
         elif filtered:
             filtered[-1][1] += n[1]
+
+    app.logger.warning(f"Notes: {len(filtered)} entries, {sum(1 for n in filtered if n[0] > 0)} voiced")
 
     return filtered[:200]  # cap for ESP32 memory
 
