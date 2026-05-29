@@ -14,7 +14,8 @@ The Cardputer hits http://<your-ip>:8888/now-playing for track info.
 import os
 import time
 import threading
-import math
+import hashlib
+import struct
 
 from flask import Flask, redirect, request, jsonify
 import requests
@@ -195,72 +196,81 @@ def prev_track():
     return jsonify({"ok": True})
 
 
-# C4-C6 frequencies for MIDI notes 60-84
-_MIDI_FREQ = {
-    midi: round(440 * 2 ** ((midi - 69) / 12))
-    for midi in range(60, 85)
-}
+# Pentatonic scales — sound good on a tiny speaker.
+# Each scale is semitone offsets from the root, spanning two octaves.
+_MAJOR_PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21]   # happy
+_MINOR_PENTA = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22]   # moody
 
 
-def _extract_notes_from_analysis(analysis_data):
-    """Convert Spotify audio analysis segments into a note sequence.
+def _seeded_rng(seed_bytes):
+    """Simple deterministic PRNG from a seed.  Returns a callable that
+    produces ints in a given range — same seed always gives the same
+    sequence."""
+    state = list(struct.unpack(">4I", seed_bytes[:16]))
 
-    Each segment has a 12-element `pitches` array (C, C#, D, ..., B)
-    representing the relative energy of each pitch class.  We pick the
-    dominant pitch, map it to a frequency in the C4-C6 range, and pair
-    it with the segment's duration.
+    def _next(lo, hi):
+        # xoshiro128** core
+        r = ((state[1] * 5) & 0xFFFFFFFF)
+        r = (((r << 7) | (r >> 25)) * 9) & 0xFFFFFFFF
+        t = (state[1] << 9) & 0xFFFFFFFF
+        state[2] ^= state[0]
+        state[3] ^= state[1]
+        state[1] ^= state[2]
+        state[0] ^= state[3]
+        state[2] ^= t
+        state[3] = ((state[3] << 11) | (state[3] >> 21)) & 0xFFFFFFFF
+        return lo + (r % (hi - lo + 1))
+
+    return _next
+
+
+def _generate_melody(track_id, duration_ms):
+    """Generate a deterministic melody from a track ID.
+
+    The track ID is hashed to seed a PRNG that picks a root note, scale,
+    tempo, and note pattern.  The same track always produces the same
+    melody.
     """
-    segments = analysis_data.get("segments", [])
-    if not segments:
-        return []
+    seed = hashlib.md5(track_id.encode()).digest()
+    rng = _seeded_rng(seed)
 
-    raw = []
-    for seg in segments:
-        pitches = seg.get("pitches", [])
-        dur_ms = int(seg.get("duration", 0.1) * 1000)
-        loudness = seg.get("loudness_max", -60)
+    # Pick root note (C4=60 through B4=71)
+    root_midi = 60 + (seed[0] % 12)
 
-        if not pitches or loudness < -40:
-            # Too quiet — treat as rest
-            raw.append([0, dur_ms])
-            continue
+    # Pick scale — use the second seed byte
+    scale = _MINOR_PENTA if seed[1] % 2 == 0 else _MAJOR_PENTA
 
-        # Find dominant pitch class (0=C, 1=C#, ..., 11=B)
-        dominant = max(range(12), key=lambda i: pitches[i])
-        confidence = pitches[dominant]
+    # Tempo: note duration range 120-400 ms
+    base_dur = 120 + (seed[2] % 280)
 
-        if confidence < 0.4:
-            raw.append([0, dur_ms])
-            continue
+    # Build note sequence to fill the track duration
+    notes = []
+    total_ms = 0
+    prev_scale_idx = len(scale) // 2  # start mid-scale
 
-        # Map to octave based on loudness (louder → higher octave)
-        if loudness > -15:
-            octave = 5  # MIDI 72-83
-        else:
-            octave = 4  # MIDI 60-71
+    while total_ms < duration_ms and len(notes) < 200:
+        # Weighted random walk: prefer stepwise motion
+        step = rng(-2, 2)
+        new_idx = max(0, min(len(scale) - 1, prev_scale_idx + step))
+        prev_scale_idx = new_idx
 
-        midi = 60 + (octave - 4) * 12 + dominant
+        midi = root_midi + scale[new_idx]
         midi = max(60, min(84, midi))
-        freq = _MIDI_FREQ[midi]
-        raw.append([freq, dur_ms])
+        freq = round(440 * 2 ** ((midi - 69) / 12))
 
-    # Compress consecutive identical frequencies
-    compressed = []
-    for note in raw:
-        if compressed and compressed[-1][0] == note[0]:
-            compressed[-1][1] += note[1]
-        else:
-            compressed.append(list(note))
+        # Vary note duration slightly
+        dur = base_dur + rng(-40, 40)
 
-    # Drop entries shorter than 50 ms (absorb into previous)
-    filtered = []
-    for n in compressed:
-        if n[1] >= 50:
-            filtered.append(n)
-        elif filtered:
-            filtered[-1][1] += n[1]
+        # Occasionally add a rest (~15% chance)
+        if rng(0, 99) < 15:
+            rest_dur = rng(80, 200)
+            notes.append([0, rest_dur])
+            total_ms += rest_dur
 
-    return filtered[:200]  # cap for ESP32 memory
+        notes.append([freq, dur])
+        total_ms += dur
+
+    return notes
 
 
 @app.route("/synth-preview")
@@ -286,6 +296,7 @@ def synth_preview():
     track_id = item.get("id", "")
     track = item.get("name", "Unknown")
     artist = ", ".join(a["name"] for a in item.get("artists", []))
+    duration_ms = item.get("duration_ms", 30000)
 
     # Return cached result if same track
     if _note_cache["track_id"] == track_id and _note_cache["notes"]:
@@ -296,17 +307,7 @@ def synth_preview():
             "notes": _note_cache["notes"],
         })
 
-    # Fetch audio analysis
-    analysis_resp = requests.get(
-        f"https://api.spotify.com/v1/audio-analysis/{track_id}",
-        headers=headers,
-    )
-    if analysis_resp.status_code != 200:
-        return jsonify({"ok": False, "error": "no_analysis"})
-
-    notes = _extract_notes_from_analysis(analysis_resp.json())
-    if not notes:
-        return jsonify({"ok": False, "error": "extraction_failed"})
+    notes = _generate_melody(track_id, duration_ms)
 
     _note_cache["track_id"] = track_id
     _note_cache["notes"] = notes
